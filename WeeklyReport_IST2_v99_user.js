@@ -4,6 +4,8 @@
 // @version      99.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
 // @author       muraoget
+// @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_v99_user.js
+// @downloadURL  https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_v99_user.js
 // @match        https://picking-console.eu.picking.aft.a2z.com/fc/IST2/pick-history*
 // @match        https://moc.prod.atlas-opensearch.qubit.amazon.dev/*
 // @match        https://atlas.qubit.amazon.dev/*
