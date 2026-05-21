@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      103.0
+// @version      99.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
 // @author       muraoget
-// @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
-// @downloadURL  https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
+// @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_v99_user.js
+// @downloadURL  https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_v99_user.js
 // @match        https://picking-console.eu.picking.aft.a2z.com/fc/IST2/pick-history*
 // @match        https://moc.prod.atlas-opensearch.qubit.amazon.dev/*
 // @match        https://atlas.qubit.amazon.dev/*
@@ -206,15 +206,6 @@
             background: linear-gradient(135deg, #f59e0b, #d97706);
             color: #1a1b2e; box-shadow: 0 4px 12px rgba(245,158,11,0.3);
         }
-        .wr-btn-stop {
-            background: linear-gradient(135deg, #ef4444, #dc2626);
-            color: #ffffff; box-shadow: 0 4px 12px rgba(239,68,68,0.3);
-            display: none;
-        }
-        .wr-btn-restart {
-            background: linear-gradient(135deg, #6366f1, #4f46e5);
-            color: #ffffff;
-        }
         .wr-btn-main:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(245,158,11,0.4); }
         .wr-btn-main:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         .wr-btn-secondary {
@@ -365,8 +356,6 @@
             </div>
 
             <button class="wr-btn wr-btn-main" id="wr-generate">📥 Generate &amp; Download</button>
-            <button class="wr-btn wr-btn-stop" id="wr-stop">⏹ Stop</button>
-            <button class="wr-btn wr-btn-restart wr-btn-secondary" id="wr-restart" style="margin-top:6px;">🔄 Restart Panel</button>
 
             <div id="wr-status"></div>
         </div>
@@ -459,14 +448,14 @@
     // ── Startup: arka planda shift pattern'leri preload et ───────────────────
     (async function autoPreloadShifts() {
         try {
-            await new Promise(r => setTimeout(r, 2000)); // sayfa yüklensin
-            const w = getWeekRange(4);
+            const w = getWeekRange(4); // ~1 ay önce
             const fromUnix = Math.floor(new Date(w.startDate + 'T00:00:00').getTime() / 1000);
             const toUnix   = Math.floor(new Date(w.endDate   + 'T23:59:59').getTime() / 1000);
             const vec = await fetchScorecard(fromUnix, toUnix);
             const pickers = vec.filter(p => p.login && p.login !== 'Unknown');
             const logins = pickers.map(p => p.login);
-            console.log('[WeeklyReport] Auto-preloading', logins.length, 'pickers via FCLM tab...');
+            console.log('[WeeklyReport] Auto-preloading', logins.length, 'pickers via FCLM...');
+            // FCLM sayfasını sessizce aç
             fetchAllShiftData(logins, null, null);
         } catch(e) {
             console.warn('[WeeklyReport] Auto-preload failed:', e);
@@ -577,17 +566,15 @@
 
     // Employee Search API — toplu login → TROB map
     function fetchShiftPatternBatch(logins) {
-        // 20'lik batch — GM_xmlhttpRequest ile direkt, sekme açmadan
         return new Promise((resolve) => {
-            const term = logins.join(', ');
-            const url = 'https://fclm-portal.amazon.com/search?term=' + encodeURIComponent(term) +
-                '&warehouseId=IST2&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
+            const url = 'https://fclm-portal.amazon.com/search?term=' + encodeURIComponent(logins.join(', ')) + '&warehouseId=IST2&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
             GM_xmlhttpRequest({
                 method: 'GET', url, withCredentials: true,
                 onload: function(resp) {
                     const result = {};
                     try {
                         const html = resp.responseText;
+                        // Yapı: <li><span class="label">Login</span>LOGIN</li> ... <li><span class="label">Shift</span>TROB-XX</li>
                         const cardRe = /class="label">Login<\/span>([\w-]+)<\/li>[\s\S]*?class="label">Shift<\/span>([\w-]+)<\/li>/g;
                         let m;
                         while ((m = cardRe.exec(html)) !== null) {
@@ -596,8 +583,7 @@
                     } catch(e) {}
                     resolve(result);
                 },
-                onerror: function() { resolve({}); },
-                ontimeout: function() { resolve({}); }
+                onerror: function() { resolve({}); }
             });
         });
     }
@@ -627,43 +613,24 @@
         if (info) info.textContent = '✓ ' + Object.keys(shiftPreloadMap).length + ' shift patterns loaded';
     });
 
-    // Open FCLM Search — her batch için ayrı sekme aç, parse et, kapat
-    async function fetchAllShiftData(logins, statusEl, btnEl) {
+    // Open FCLM Search with all picker logins
+    function fetchAllShiftData(logins, statusEl, btnEl) {
         if (!logins || logins.length === 0) return;
-        const BATCH = 20;
-        const totalBatches = Math.ceil(logins.length / BATCH);
+        if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Opening FCLM...'; }
+        if (statusEl) { statusEl.style.color = '#f9e2af'; statusEl.textContent = 'Opening FCLM...'; }
 
-        for (let i = 0; i < totalBatches; i++) {
-            if (wrStopRequested) break;
-            const batch = logins.slice(i * BATCH, (i + 1) * BATCH);
-            const term = encodeURIComponent(batch.join(', '));
-            const url = 'https://fclm-portal.amazon.com/search?term=' + term +
-                '&warehouseId=IST2&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
+        const term = logins.join(', ');
+        const fclmUrl = 'https://fclm-portal.amazon.com/search?term=' + encodeURIComponent(term) +
+            '&warehouseId=IST2&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
 
-            if (statusEl) statusEl.textContent = 'Loading shifts... batch ' + (i+1) + '/' + totalBatches;
-
-            // Sekmeden veri bekle
-            await new Promise((resolve) => {
-                const win = window.open(url, '_blank');
-                if (!win) { resolve(); return; }
-
-                const onMsg = function(e) {
-                    if (!e.data || e.data.type !== 'WR_FCLM_SHIFTS') return;
-                    window.removeEventListener('message', onMsg);
-                    resolve();
-                };
-                window.addEventListener('message', onMsg);
-
-                // 10 saniye timeout
-                setTimeout(() => {
-                    window.removeEventListener('message', onMsg);
-                    resolve();
-                }, 10000);
-            });
+        const fclmWin = window.open(fclmUrl, '_blank');
+        if (!fclmWin) {
+            if (statusEl) { statusEl.style.color = '#f38ba8'; statusEl.textContent = 'Popup blocked!'; }
+            if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 Fetch Shift Data'; }
+            return;
         }
-
-        if (statusEl) statusEl.textContent = '✓ ' + Object.keys(shiftPreloadMap).length + ' shift patterns loaded';
-        if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 Fetch Shift Data'; }
+        if (btnEl) { btnEl.textContent = '⏳ Waiting...'; }
+        if (statusEl) { statusEl.textContent = 'Fetching shift data from FCLM...'; }
     }
     window.addEventListener('message', function(e) {
         if (!e.data || e.data.type !== 'WR_ATLAS_RESULT') return;
@@ -826,7 +793,6 @@
 
     // ── Shift cache    // ── Shift cache ────────────────────────────────────────────────────────────
     const shiftPreloadMap = {};
-    let wrStopRequested = false;
     let scorecardCache = [];
     let allPickersCache = []; // Son 3 haftanın birleşik listesi
 
@@ -862,20 +828,27 @@
 
     // ── Shift Pattern Preload — batch paralel ────────────────────────────────
     async function preloadShiftPatterns(pickers, statusEl) {
-        // 20'lik batch — GM_xmlhttpRequest ile direkt, stop destekli
-        const BATCH = 20;
+        // Employee Search API ile 50'lik batch'ler halinde toplu çek
+        const BATCH = 50;
         for (let i = 0; i < pickers.length; i += BATCH) {
-            if (wrStopRequested) { wrStopRequested = false; break; }
             const batch = pickers.slice(i, i + BATCH).filter(p => !shiftPreloadMap[p.login] && p.login);
             if (batch.length > 0) {
                 const logins = batch.map(p => p.login);
                 const result = await fetchShiftPatternBatch(logins);
+                // Bulunanları kaydet
                 logins.forEach(login => {
                     shiftPreloadMap[login] = result[login] || '-';
                 });
+                // Bulunamayanları tek tek timeDetails ile dene
+                const missing = logins.filter(l => !result[l]);
+                for (const login of missing) {
+                    const picker = batch.find(p => p.login === login);
+                    if (picker && picker.employeeId) {
+                        shiftPreloadMap[login] = await fetchShiftPattern(picker.employeeId).catch(() => '-');
+                    }
+                }
             }
             if (statusEl) statusEl.textContent = 'Loading shifts... ' + Math.min(i + BATCH, pickers.length) + '/' + pickers.length;
-            await new Promise(r => setTimeout(r, 200));
         }
     }
 
@@ -1072,30 +1045,11 @@
         btn.disabled = false;
     });
 
-    // Stop butonu
-    document.getElementById('wr-stop').addEventListener('click', () => {
-        wrStopRequested = true;
-        document.getElementById('wr-stop').style.display = 'none';
-        document.getElementById('wr-generate').disabled = false;
-        document.getElementById('wr-generate').textContent = '📥 Generate & Download';
-        const status = document.getElementById('wr-status');
-        if (status) { status.style.display = 'block'; status.textContent = '⏹ Stopped.'; }
-    });
-
-    // Restart butonu
-    document.getElementById('wr-restart').addEventListener('click', () => {
-        location.reload();
-    });
-
-    // Generate butonu — Stop göster/gizle
     document.getElementById('wr-generate').addEventListener('click', async () => {
         const btn = document.getElementById('wr-generate');
-        const stopBtn = document.getElementById('wr-stop');
         const status = document.getElementById('wr-status');
         btn.disabled = true;
         btn.textContent = '⏳ Generating...';
-        stopBtn.style.display = 'block';
-        wrStopRequested = false;
         status.style.display = 'block';
         status.className = '';
 
@@ -1111,8 +1065,6 @@
         } finally {
             btn.disabled = false;
             btn.textContent = '📥 Generate & Download';
-            stopBtn.style.display = 'none';
-            wrStopRequested = false;
         }
     });
 
@@ -1282,7 +1234,6 @@
         const pickHistoryMap = {};
         const shiftMap = {};
         for (let i = 0; i < pickerList.length; i++) {
-            if (wrStopRequested) { status.textContent = '⏹ Stopped.'; break; }
             const sc = pickerList[i];
             status.textContent = 'Fetching data ' + (i+1) + '/' + pickerList.length + ' — ' + sc.login;
             try {
@@ -1895,8 +1846,8 @@ function injectFCLMSearchPanel() {
     if (!window.opener) return;
 
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:20px;right:20px;z-index:99999;background:#1e1e2e;color:#cdd6f4;padding:14px 18px;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,0.5);min-width:220px;';
-    overlay.innerHTML = '<div style="font-weight:700;">📋 Reading shifts...</div>';
+    overlay.style.cssText = 'position:fixed;top:20px;right:20px;z-index:99999;background:#1e1e2e;color:#cdd6f4;padding:16px 20px;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,0.5);min-width:260px;';
+    overlay.innerHTML = '<div style="font-weight:700;">📋 Weekly Report — Reading shifts...</div>';
     document.body.appendChild(overlay);
 
     function parseAndSend() {
@@ -1908,15 +1859,21 @@ function injectFCLMSearchPanel() {
             shiftMap[m[1]] = m[2];
         }
         const count = Object.keys(shiftMap).length;
-        overlay.innerHTML = '<div style="font-weight:700;color:#a6e3a1;">✓ ' + count + ' found</div>';
-        try { window.opener.postMessage({ type: 'WR_FCLM_SHIFTS', shiftMap }, '*'); } catch(e) {}
-        setTimeout(() => window.close(), 800);
+        console.log('[FCLM] Shift patterns parsed:', count, shiftMap);
+        overlay.innerHTML = '<div style="font-weight:700;color:#a6e3a1;">✓ ' + count + ' shift patterns found, sending...</div>';
+        try {
+            window.opener.postMessage({ type: 'WR_FCLM_SHIFTS', shiftMap }, '*');
+        } catch(e) {}
+        setTimeout(() => {
+            overlay.innerHTML = '<div style="font-weight:700;color:#a6e3a1;">✓ Done! This tab can be closed.</div>';
+            setTimeout(() => window.close(), 1500);
+        }, 500);
     }
 
     if (document.readyState === 'complete') {
-        setTimeout(parseAndSend, 600);
+        setTimeout(parseAndSend, 800);
     } else {
-        window.addEventListener('load', () => setTimeout(parseAndSend, 600));
+        window.addEventListener('load', () => setTimeout(parseAndSend, 800));
     }
 }
 
