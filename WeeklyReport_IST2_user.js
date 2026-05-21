@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      101.0
+// @version      102.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
@@ -465,9 +465,9 @@
             const toUnix   = Math.floor(new Date(w.endDate   + 'T23:59:59').getTime() / 1000);
             const vec = await fetchScorecard(fromUnix, toUnix);
             const pickers = vec.filter(p => p.login && p.login !== 'Unknown');
-            console.log('[WeeklyReport] Auto-preloading', pickers.length, 'pickers via FCLM batch...');
-            await preloadShiftPatterns(pickers, null);
-            console.log('[WeeklyReport] Shift patterns preloaded:', Object.keys(shiftPreloadMap).length);
+            const logins = pickers.map(p => p.login);
+            console.log('[WeeklyReport] Auto-preloading', logins.length, 'pickers via FCLM tab...');
+            fetchAllShiftData(logins, null, null);
         } catch(e) {
             console.warn('[WeeklyReport] Auto-preload failed:', e);
         }
