@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      112.0
+// @version      114.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
 // @author       muraoget
-// @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_v99_user.js
-// @downloadURL  https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_v99_user.js
+// @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
+// @downloadURL  https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
 // @match        https://picking-console.eu.picking.aft.a2z.com/fc/IST2/pick-history*
 // @match        https://moc.prod.atlas-opensearch.qubit.amazon.dev/*
 // @match        https://atlas.qubit.amazon.dev/*
@@ -950,12 +950,11 @@
 
         const pickers = allPickersCache.filter(p => p.managerName === manager && p.login && p.login !== 'Unknown');
 
-        // Shift pattern'ları paralel çek
-        await Promise.all(pickers.map(async (sc) => {
-            if (!shiftPreloadMap[sc.login]) {
-                shiftPreloadMap[sc.login] = await fetchShiftPattern(sc.employeeId);
-            }
-        }));
+        // Shift pattern'ları FCLM batch ile çek — fetchAllShiftData ile
+        const missingLogins = pickers.filter(p => !shiftPreloadMap[p.login]).map(p => p.login);
+        if (missingLogins.length > 0) {
+            await fetchAllShiftData(missingLogins, null, null);
+        }
 
         const shifts = [...new Set(pickers.map(sc => shiftPreloadMap[sc.login] || '-'))].sort();
 
@@ -1328,9 +1327,18 @@
                     continue;
                 }
             } catch(e) {}
-            shiftMap[sc.login] = shiftPreloadMap[sc.login] || await fetchShiftPattern(sc.employeeId).catch(() => '-');
+            shiftMap[sc.login] = shiftPreloadMap[sc.login] || '-';
             await new Promise(r => setTimeout(r, 100));
         }
+
+        // Eksik shift pattern'ları toplu çek
+        const missingShifts = pickerList.filter(p => !shiftPreloadMap[p.login]).map(p => p.login);
+        if (missingShifts.length > 0) {
+            status.textContent = 'Loading missing shift patterns...';
+            await fetchAllShiftData(missingShifts, null, null);
+            pickerList.forEach(p => { shiftMap[p.login] = shiftPreloadMap[p.login] || '-'; });
+        }
+
         console.log('[WeeklyReport] Aktif picker sayisi (pick history olan):', pickerList.length);
 
         // Recalc DPMO using current scorecardCache (now populated)
