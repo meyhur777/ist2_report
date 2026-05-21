@@ -627,24 +627,41 @@
         if (info) info.textContent = '✓ ' + Object.keys(shiftPreloadMap).length + ' shift patterns loaded';
     });
 
-    // Open FCLM Search with all picker logins
+    // Open FCLM Search and do batch processing via postMessage
     function fetchAllShiftData(logins, statusEl, btnEl) {
         if (!logins || logins.length === 0) return;
         if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Opening FCLM...'; }
         if (statusEl) { statusEl.style.color = '#f9e2af'; statusEl.textContent = 'Opening FCLM...'; }
 
-        const term = logins.join(', ');
-        const fclmUrl = 'https://fclm-portal.amazon.com/search?term=' + encodeURIComponent(term) +
-            '&warehouseId=IST2&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
-
+        const fclmUrl = 'https://fclm-portal.amazon.com/search?warehouseId=IST2&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
         const fclmWin = window.open(fclmUrl, '_blank');
+
         if (!fclmWin) {
-            if (statusEl) { statusEl.style.color = '#f38ba8'; statusEl.textContent = 'Popup blocked!'; }
+            if (statusEl) { statusEl.style.color = '#f38ba8'; statusEl.textContent = 'Popup blocked! Allow popups for this site.'; }
             if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 Fetch Shift Data'; }
             return;
         }
-        if (btnEl) { btnEl.textContent = '⏳ Waiting...'; }
-        if (statusEl) { statusEl.textContent = 'Fetching shift data from FCLM...'; }
+
+        if (btnEl) btnEl.textContent = '⏳ Loading shifts...';
+
+        // FCLM sekmesi hazır olunca login listesini gönder
+        const onReady = function(e) {
+            if (!e.data || e.data.type !== 'WR_FCLM_READY') return;
+            window.removeEventListener('message', onReady);
+            fclmWin.postMessage({ type: 'WR_FCLM_START', logins }, '*');
+            if (statusEl) statusEl.textContent = 'FCLM fetching ' + logins.length + ' pickers in batches...';
+        };
+        window.addEventListener('message', onReady);
+
+        if (btnEl) {
+            // Bitince butonu resetle
+            const onDone = function(e) {
+                if (!e.data || e.data.type !== 'WR_FCLM_SHIFTS') return;
+                window.removeEventListener('message', onDone);
+                if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 Fetch Shift Data'; }
+            };
+            window.addEventListener('message', onDone);
+        }
     }
     window.addEventListener('message', function(e) {
         if (!e.data || e.data.type !== 'WR_ATLAS_RESULT') return;
@@ -1876,34 +1893,93 @@ function injectFCLMSearchPanel() {
     if (!window.opener) return;
 
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:20px;right:20px;z-index:99999;background:#1e1e2e;color:#cdd6f4;padding:16px 20px;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,0.5);min-width:260px;';
-    overlay.innerHTML = '<div style="font-weight:700;">📋 Weekly Report — Reading shifts...</div>';
+    overlay.style.cssText = 'position:fixed;top:20px;right:20px;z-index:99999;background:#1e1e2e;color:#cdd6f4;padding:16px 20px;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,0.5);min-width:280px;';
+    overlay.innerHTML = '<div style="font-weight:700;">📋 Weekly Report — Waiting for logins...</div>';
     document.body.appendChild(overlay);
 
-    function parseAndSend() {
+    const BATCH = 20;
+    const STORAGE_KEY = 'wr_fclm_session';
+
+    function parseCurrentPage(shiftMap) {
         const html = document.body.innerHTML;
-        const shiftMap = {};
         const cardRe = /class="label">Login<\/span>([\w-]+)<\/li>[\s\S]*?class="label">Shift<\/span>([\w-]+)<\/li>/g;
         let m;
         while ((m = cardRe.exec(html)) !== null) {
             shiftMap[m[1]] = m[2];
         }
+        return shiftMap;
+    }
+
+    function submitBatch(logins) {
+        const input = document.getElementById('term');
+        const form = input ? input.closest('form') : null;
+        if (!input || !form) { console.error('[FCLM] Form not found'); return; }
+        input.value = logins.join(', ');
+        // Submit butonu bul
+        const submitBtn = form.querySelector('input[type=submit], button[type=submit]');
+        if (submitBtn) submitBtn.click();
+        else form.submit();
+    }
+
+    function sendAndClose(shiftMap) {
         const count = Object.keys(shiftMap).length;
-        console.log('[FCLM] Shift patterns parsed:', count, shiftMap);
         overlay.innerHTML = '<div style="font-weight:700;color:#a6e3a1;">✓ ' + count + ' shift patterns found, sending...</div>';
-        try {
-            window.opener.postMessage({ type: 'WR_FCLM_SHIFTS', shiftMap }, '*');
-        } catch(e) {}
+        sessionStorage.removeItem(STORAGE_KEY);
+        try { window.opener.postMessage({ type: 'WR_FCLM_SHIFTS', shiftMap }, '*'); } catch(e) {}
         setTimeout(() => {
             overlay.innerHTML = '<div style="font-weight:700;color:#a6e3a1;">✓ Done! This tab can be closed.</div>';
             setTimeout(() => window.close(), 1500);
         }, 500);
     }
 
+    // Sayfa yüklenince — devam eden session var mı?
+    function onPageLoad() {
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        if (raw) {
+            // Devam eden session — parse et ve sonraki batch'e geç
+            const session = JSON.parse(raw);
+            const shiftMap = session.shiftMap || {};
+            parseCurrentPage(shiftMap);
+            session.shiftMap = shiftMap;
+            session.batchIndex++;
+
+            const totalBatches = Math.ceil(session.logins.length / BATCH);
+            overlay.innerHTML = '<div style="font-weight:700;">📋 Batch ' + session.batchIndex + '/' + totalBatches + ' — ' + Object.keys(shiftMap).length + ' pickers loaded...</div>';
+
+            if (session.batchIndex >= totalBatches) {
+                sendAndClose(shiftMap);
+                return;
+            }
+
+            sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+            const batch = session.logins.slice(session.batchIndex * BATCH, (session.batchIndex + 1) * BATCH);
+            setTimeout(() => submitBatch(batch), 800);
+        } else {
+            // Yeni session — opener'a hazır olduğumuzu bildir
+            overlay.innerHTML = '<div style="font-weight:700;">📋 Weekly Report — Ready, waiting...</div>';
+            try { window.opener.postMessage({ type: 'WR_FCLM_READY' }, '*'); } catch(e) {}
+
+            // Opener'dan login listesini bekle
+            window.addEventListener('message', function(e) {
+                if (!e.data || e.data.type !== 'WR_FCLM_START') return;
+                const logins = e.data.logins || [];
+                if (logins.length === 0) return;
+
+                const session = { logins, batchIndex: 0, shiftMap: {} };
+                sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+
+                const totalBatches = Math.ceil(logins.length / BATCH);
+                overlay.innerHTML = '<div style="font-weight:700;">📋 Batch 1/' + totalBatches + ' — Starting...</div>';
+                const batch = logins.slice(0, BATCH);
+                setTimeout(() => submitBatch(batch), 500);
+            });
+        }
+    }
+
     if (document.readyState === 'complete') {
-        setTimeout(parseAndSend, 800);
+        setTimeout(onPageLoad, 800);
     } else {
-        window.addEventListener('load', () => setTimeout(parseAndSend, 800));
+        window.addEventListener('load', () => setTimeout(onPageLoad, 800));
     }
 }
 
