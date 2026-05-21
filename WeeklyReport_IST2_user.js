@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      114.0
+// @version      115.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
@@ -2200,8 +2200,8 @@ function readTableAndSend() {
     // Başlat
     setTimeout(() => {
         clickRawReports();
-        setTimeout(() => processAllPages(1, 20), 2000);
-    }, 1000);
+        setTimeout(() => processAllPages(1, 30), 4000);
+    }, 2000);
 }
 
 function injectAtlasPanel() {
