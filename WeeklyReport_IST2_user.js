@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      115.0
-// @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
+// @version      123.0
+// @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker (Roster shift fetch)
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
 // @downloadURL  https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
@@ -456,18 +456,13 @@
     }
     setDefaultDates();
 
-    // ── Startup: arka planda shift pattern'leri preload et ───────────────────
+    // ── Startup: arka planda shift pattern'leri preload et (Roster) ──────────
     (async function autoPreloadShifts() {
         try {
             await new Promise(r => setTimeout(r, 2000)); // sayfa yüklensin
-            const w = getWeekRange(4);
-            const fromUnix = Math.floor(new Date(w.startDate + 'T00:00:00').getTime() / 1000);
-            const toUnix   = Math.floor(new Date(w.endDate   + 'T23:59:59').getTime() / 1000);
-            const vec = await fetchScorecard(fromUnix, toUnix);
-            const pickers = vec.filter(p => p.login && p.login !== 'Unknown');
-            const logins = pickers.map(p => p.login);
-            console.log('[WeeklyReport] Auto-preloading', logins.length, 'pickers via FCLM...');
-            await fetchAllShiftData(logins, null, null);
+            console.log('[WeeklyReport] Auto-preloading shifts via Employee Roster...');
+            await fetchAllShiftsFromRoster(null, null);
+            console.log('[WeeklyReport] Roster preload complete:', Object.keys(shiftPreloadMap).length, 'shifts');
         } catch(e) {
             console.warn('[WeeklyReport] Auto-preload failed:', e);
         }
@@ -630,52 +625,203 @@
     });
 
     // FCLM batch — GM_xmlhttpRequest ile direkt, 20'lik gruplar
-    async function fetchAllShiftData(logins, statusEl, btnEl) {
-        if (!logins || logins.length === 0) return;
-        if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Loading shifts...'; }
+    // ── Shift Pattern — tek seferde Employee Roster'dan çek ────────────────────
+    async function fetchAllShiftsFromRoster(statusEl, btnEl) {
+        if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Loading roster...'; }
+        if (statusEl) statusEl.textContent = 'Fetching employee roster...';
 
-        const BATCH = 20;
-        const totalBatches = Math.ceil(logins.length / BATCH);
+        const ROSTER_URL = 'https://fclm-portal.amazon.com/employee/employeeRoster' +
+            '?reportFormat=HTML&warehouseId=IST2' +
+            '&employeeStatusActive=true&_employeeStatusActive=on' +
+            '&_employeeStatusLeaveOfAbsence=on&_employeeStatusExempt=on' +
+            '&employeeTypeAmzn=true&_employeeTypeAmzn=on' +
+            '&employeeTypeTemp=true&_employeeTypeTemp=on' +
+            '&employeeType3Pty=true&_employeeType3Pty=on' +
+            '&User+ID=User+ID&Shift+Pattern=Shift+Pattern&Manager+Name=Manager+Name' +
+            '&hideColumns=Photo%2CJob+Title%2CManagement+Area+ID%2CBadge+RFID%2CExempt' +
+            '&submit=true' +
+            '&startHourIntraday1=0&startMinuteIntraday1=0' +
+            '&startHourIntraday2=0&startMinuteIntraday2=0';
 
-        for (let i = 0; i < totalBatches; i++) {
-            if (wrStopRequested) break;
-            const batch = logins.slice(i * BATCH, (i + 1) * BATCH);
-            const url = 'https://fclm-portal.amazon.com/search?term=' + encodeURIComponent(batch.join(', ')) +
-                '&warehouseId=IST2&employeeStatusActive=true&employeeStatusInactive=true&employeeStatusTerminated=true&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: ROSTER_URL,
+                withCredentials: true,
+                timeout: 60000,
+                onload: function(resp) {
+                    if (resp.status !== 200) {
+                        console.error('[ROSTER] HTTP', resp.status);
+                        if (statusEl) statusEl.textContent = '\u274c Roster failed (HTTP ' + resp.status + ')';
+                        if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
+                        resolve({});
+                        return;
+                    }
 
-            if (statusEl) statusEl.textContent = 'Loading shifts... ' + (i+1) + '/' + totalBatches + ' (' + Object.keys(shiftPreloadMap).length + ' loaded)';
+                    // Login redirect kontrolü
+                    if (resp.responseText.includes('ap/signin') || resp.responseText.length < 1000) {
+                        console.error('[ROSTER] Auth redirect detected, size:', resp.responseText.length);
+                        if (statusEl) statusEl.textContent = '\u274c FCLM oturumu açık değil — yeni sekmede FCLM\'e gir';
+                        if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
+                        resolve({});
+                        return;
+                    }
 
-            const result = await new Promise((resolve) => {
-                GM_xmlhttpRequest({
-                    method: 'GET', url, withCredentials: true,
-                    onload: function(resp) {
-                        const map = {};
-                        console.log('[FCLM] Batch', i+1, 'status:', resp.status, 'size:', resp.responseText.length);
-                        try {
-                            const html = resp.responseText;
-                            const cardRe = /class="label">Login<\/span>([\w-]+)<\/li>[\s\S]*?class="label">Shift<\/span>([\w-]+)<\/li>/g;
-                            let m;
-                            while ((m = cardRe.exec(html)) !== null) {
-                                map[m[1]] = m[2];
+                    const map = {};
+                    try {
+                        const html = resp.responseText;
+                        console.log('[ROSTER] Response size:', html.length);
+
+                        // Tüm <tr>...</tr> bloklarını ayır
+                        const allRows = html.split(/<\/tr>/i);
+                        let userIdIdx = -1, shiftIdx = -1;
+                        let headerFound = false;
+                        let rowCount = 0;
+
+                        for (let ri = 0; ri < allRows.length; ri++) {
+                            const rowHtml = allRows[ri];
+                            // Hücreleri çıkar (<td> veya <th>) — multiline content destekli
+                            const cells = [];
+                            const cellRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+                            let cm;
+                            while ((cm = cellRe.exec(rowHtml)) !== null) {
+                                // HTML tag'lerini temizle, entity decode, trim
+                                cells.push(cm[1].replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').trim());
                             }
-                            console.log('[FCLM] Batch', i+1, 'parsed:', Object.keys(map).length, 'of', batch.length);
-                            const missing = batch.filter(l => !map[l]);
-                            if (missing.length > 0) console.log('[FCLM] Batch', i+1, 'missing:', missing);
-                        } catch(e) {}
-                        resolve(map);
-                    },
-                    onerror: function() { console.error('[FCLM] Batch', i+1, 'error'); resolve({}); },
-                    ontimeout: function() { console.error('[FCLM] Batch', i+1, 'timeout'); resolve({}); }
-                });
+                            if (cells.length < 3) continue;
+
+                            // Header satırını tespit et (kolon adlarını içerir)
+                            if (!headerFound) {
+                                const joinedCells = cells.join('|').toLowerCase();
+                                if (joinedCells.includes('user') && joinedCells.includes('shift')) {
+                                    // Header hücrelerinde sort ikonları/oklar olabilir, contains ile bul
+                                    userIdIdx = cells.findIndex(c => /user\s*id/i.test(c));
+                                    shiftIdx = cells.findIndex(c => /shift\s*pattern/i.test(c));
+                                    if (userIdIdx >= 0 && shiftIdx >= 0) {
+                                        headerFound = true;
+                                        console.log('[ROSTER] Header found at row', ri, '— UserID col:', userIdIdx, 'Shift col:', shiftIdx);
+                                        console.log('[ROSTER] All headers:', cells);
+                                        continue;
+                                    }
+                                }
+                                // Employee ID + User ID pattern ile de header tespit et
+                                if (joinedCells.includes('employee id') && joinedCells.includes('user')) {
+                                    userIdIdx = cells.findIndex(c => /user/i.test(c) && !/employee/i.test(c));
+                                    shiftIdx = cells.findIndex(c => /shift/i.test(c));
+                                    if (userIdIdx < 0) userIdIdx = 1; // default
+                                    if (shiftIdx < 0) shiftIdx = cells.length - 1; // son kolon
+                                    headerFound = true;
+                                    console.log('[ROSTER] Header found (relaxed) at row', ri, '— UserID col:', userIdIdx, 'Shift col:', shiftIdx);
+                                    continue;
+                                }
+                                continue; // header bulunana kadar skip
+                            }
+
+                            // Data satırı — header bulunduktan sonra
+                            if (cells.length > Math.max(userIdIdx, shiftIdx)) {
+                                const userId = cells[userIdIdx];
+                                const shift = cells[shiftIdx];
+                                // userId: harf ile başlamalı, Employee ID (pure numeric) olmamalı
+                                if (userId && /^[a-z]/i.test(userId) && !/^\d+$/.test(userId) && userId.length >= 3) {
+                                    map[userId.toLowerCase()] = shift || '-';
+                                    rowCount++;
+                                }
+                            }
+                        }
+
+                        // Fallback: header bulunamadıysa sabit index dene
+                        if (!headerFound || rowCount === 0) {
+                            console.warn('[ROSTER] Header detection failed or no rows parsed, trying fixed indices (1=UserID, last=Shift)');
+                            const rowRe2 = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+                            let row2;
+                            while ((row2 = rowRe2.exec(html)) !== null) {
+                                const cells2 = [];
+                                const cellRe2 = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+                                let c2;
+                                while ((c2 = cellRe2.exec(row2[1])) !== null) {
+                                    cells2.push(c2[1].replace(/<[^>]*>/g, '').trim());
+                                }
+                                if (cells2.length >= 5) {
+                                    const uid = cells2[1]; // User ID always at index 1
+                                    const sp = cells2[cells2.length - 1]; // Shift Pattern = last column
+                                    if (uid && /^[a-z]/i.test(uid) && !/^\d+$/.test(uid) && uid.length >= 3) {
+                                        // Shift pattern formatı doğrula: TR/FS/FSOB prefix veya kısa alfanümerik
+                                        if (sp && !/^\d{6,}$/.test(sp)) {
+                                            map[uid.toLowerCase()] = sp;
+                                            rowCount++;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        console.log('[ROSTER] Parsed:', rowCount, 'employees with shift data');
+                        // Sanity check: shift pattern formatı kontrol
+                        const sampleShifts = Object.values(map).slice(0, 10);
+                        const hasNumericShifts = sampleShifts.some(s => /^\d{6,}$/.test(s));
+                        if (hasNumericShifts) {
+                            console.error('[ROSTER] ⚠️ WARNING: Shift patterns look like Employee IDs!', sampleShifts);
+                            console.error('[ROSTER] Clearing bad data and retrying with fixed indices...');
+                            // Clear bad data and retry
+                            Object.keys(map).forEach(k => delete map[k]);
+                            rowCount = 0;
+                            const rowRe3 = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+                            let row3;
+                            while ((row3 = rowRe3.exec(html)) !== null) {
+                                const cells3 = [];
+                                const cellRe3 = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+                                let c3;
+                                while ((c3 = cellRe3.exec(row3[1])) !== null) {
+                                    cells3.push(c3[1].replace(/<[^>]*>/g, '').trim());
+                                }
+                                if (cells3.length >= 5) {
+                                    const uid = cells3[1];
+                                    const sp = cells3[cells3.length - 1];
+                                    if (uid && /^[a-z]/i.test(uid) && !/^\d+$/.test(uid) && uid.length >= 3 && sp && !/^\d{6,}$/.test(sp)) {
+                                        map[uid.toLowerCase()] = sp;
+                                        rowCount++;
+                                    }
+                                }
+                            }
+                            console.log('[ROSTER] Retry parsed:', rowCount, 'employees');
+                        }
+                    } catch(e) {
+                        console.error('[ROSTER] Parse error:', e);
+                    }
+
+                    Object.assign(shiftPreloadMap, map);
+                    if (statusEl) statusEl.textContent = '\u2713 ' + Object.keys(map).length + ' shift patterns loaded (roster)';
+                    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
+                    resolve(map);
+                },
+                onerror: function(e) {
+                    console.error('[ROSTER] Request error:', e);
+                    if (statusEl) statusEl.textContent = '\u274c Roster bağlantı hatası';
+                    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
+                    resolve({});
+                },
+                ontimeout: function() {
+                    console.error('[ROSTER] Timeout (60s)');
+                    if (statusEl) statusEl.textContent = '\u274c Roster timeout — FCLM yavaş yanıt verdi';
+                    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
+                    resolve({});
+                }
             });
+        });
+    }
 
+    // Legacy fallback — tekil eksikler için batch (küçük gruplar)
+    async function fetchMissingShiftsBatch(logins, statusEl) {
+        if (!logins || logins.length === 0) return;
+        const BATCH = 10;
+        for (let i = 0; i < logins.length; i += BATCH) {
+            if (wrStopRequested) break;
+            const batch = logins.slice(i, i + BATCH);
+            const result = await fetchShiftPatternBatch(batch);
             Object.assign(shiftPreloadMap, result);
-            await new Promise(r => setTimeout(r, 200));
+            if (statusEl) statusEl.textContent = 'Fallback shifts... ' + Math.min(i + BATCH, logins.length) + '/' + logins.length;
+            await new Promise(r => setTimeout(r, 300));
         }
-
-        if (statusEl) statusEl.textContent = '✓ ' + Object.keys(shiftPreloadMap).length + ' shift patterns loaded';
-        if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 Fetch Shift Data'; }
-        console.log('[FCLM] Total loaded:', Object.keys(shiftPreloadMap).length);
     }
     window.addEventListener('message', function(e) {
         if (!e.data || e.data.type !== 'WR_ATLAS_RESULT') return;
@@ -907,35 +1053,29 @@
         const toUnix = Math.floor(new Date(toDate + 'T23:59:59').getTime() / 1000);
         const vec = await fetchScorecard(fromUnix, toUnix);
         const pickers = vec.filter(p => p.login && p.login !== 'Unknown');
-        const logins = pickers.map(p => p.login);
 
-        info.textContent = 'Opening FCLM for ' + logins.length + ' pickers...';
-        fetchAllShiftData(logins, info, btn);
+        info.textContent = 'Fetching from Employee Roster...';
+        await fetchAllShiftsFromRoster(info, btn);
 
-        // FCLM'den veri gelince dropdown'ı doldur
-        const fillDropdown = function(e) {
-            if (!e.data || e.data.type !== 'WR_FCLM_SHIFTS') return;
-            const allShifts = [...new Set(pickers.map(p => shiftPreloadMap[p.login] || '-').filter(s => s !== '-'))].sort();
-            const shiftSel = document.getElementById('wr-shift-select');
-            shiftSel.innerHTML = '<option value="">— Select Shift Pattern —</option>';
-            const totalCount = pickers.filter(p => shiftPreloadMap[p.login] && shiftPreloadMap[p.login] !== '-').length;
-            const allOpt = document.createElement('option');
-            allOpt.value = '__ALL__';
-            allOpt.textContent = '— All Shifts (' + totalCount + ' pickers) —';
-            shiftSel.appendChild(allOpt);
-            allShifts.forEach(shift => {
-                const count = pickers.filter(p => shiftPreloadMap[p.login] === shift).length;
-                const opt = document.createElement('option');
-                opt.value = shift;
-                opt.textContent = shift + ' (' + count + ' pickers)';
-                shiftSel.appendChild(opt);
-            });
-            info.textContent = '✓ ' + allShifts.length + ' shift patterns loaded';
-            btn.disabled = false;
-            btn.textContent = '🔄 Reload Shift Patterns';
-            window.removeEventListener('message', fillDropdown);
-        };
-        window.addEventListener('message', fillDropdown);
+        // Roster'dan çekilen verilerle dropdown'ı doldur
+        const allShifts = [...new Set(pickers.map(p => shiftPreloadMap[p.login] || '-').filter(s => s !== '-'))].sort();
+        const shiftSel = document.getElementById('wr-shift-select');
+        shiftSel.innerHTML = '<option value="">— Select Shift Pattern —</option>';
+        const totalCount = pickers.filter(p => shiftPreloadMap[p.login] && shiftPreloadMap[p.login] !== '-').length;
+        const allOpt = document.createElement('option');
+        allOpt.value = '__ALL__';
+        allOpt.textContent = '— All Shifts (' + totalCount + ' pickers) —';
+        shiftSel.appendChild(allOpt);
+        allShifts.forEach(shift => {
+            const count = pickers.filter(p => shiftPreloadMap[p.login] === shift).length;
+            const opt = document.createElement('option');
+            opt.value = shift;
+            opt.textContent = shift + ' (' + count + ' pickers)';
+            shiftSel.appendChild(opt);
+        });
+        info.textContent = '✓ ' + totalCount + '/' + pickers.length + ' pickers matched | ' + allShifts.length + ' shift patterns';
+        btn.disabled = false;
+        btn.textContent = '🔄 Reload Shift Patterns';
     });
 
     // Manager değişince shift'leri yükle
@@ -950,10 +1090,14 @@
 
         const pickers = allPickersCache.filter(p => p.managerName === manager && p.login && p.login !== 'Unknown');
 
-        // Shift pattern'ları FCLM batch ile çek — fetchAllShiftData ile
+        // Eksik shift'ler varsa roster'dan hepsini çek (veya fallback batch)
         const missingLogins = pickers.filter(p => !shiftPreloadMap[p.login]).map(p => p.login);
-        if (missingLogins.length > 0) {
-            await fetchAllShiftData(missingLogins, null, null);
+        if (missingLogins.length > 5) {
+            // Çok sayıda eksik varsa roster'ı tekrar çek
+            await fetchAllShiftsFromRoster(null, null);
+        } else if (missingLogins.length > 0) {
+            // Az sayıda eksikse batch fallback kullan
+            await fetchMissingShiftsBatch(missingLogins, null);
         }
 
         const shifts = [...new Set(pickers.map(sc => shiftPreloadMap[sc.login] || '-'))].sort();
@@ -1331,11 +1475,15 @@
             await new Promise(r => setTimeout(r, 100));
         }
 
-        // Eksik shift pattern'ları toplu çek
+        // Eksik shift pattern'ları çek (roster veya fallback)
         const missingShifts = pickerList.filter(p => !shiftPreloadMap[p.login]).map(p => p.login);
         if (missingShifts.length > 0) {
-            status.textContent = 'Loading missing shift patterns...';
-            await fetchAllShiftData(missingShifts, null, null);
+            status.textContent = 'Loading missing shift patterns (' + missingShifts.length + ')...';
+            if (missingShifts.length > 5) {
+                await fetchAllShiftsFromRoster(null, null);
+            } else {
+                await fetchMissingShiftsBatch(missingShifts, null);
+            }
             pickerList.forEach(p => { shiftMap[p.login] = shiftPreloadMap[p.login] || '-'; });
         }
 
