@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      116.0
+// @version      115.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
@@ -629,47 +629,53 @@
         if (info) info.textContent = '✓ ' + Object.keys(shiftPreloadMap).length + ' shift patterns loaded';
     });
 
-    // Employee Roster — tek istek, tüm warehouse TROB'ları
+    // FCLM batch — GM_xmlhttpRequest ile direkt, 20'lik gruplar
     async function fetchAllShiftData(logins, statusEl, btnEl) {
+        if (!logins || logins.length === 0) return;
         if (btnEl) { btnEl.disabled = true; btnEl.textContent = '⏳ Loading shifts...'; }
-        if (statusEl) statusEl.textContent = 'Loading shift patterns from Employee Roster...';
 
-        const url = 'https://fclm-portal.amazon.com/employee/employeeRoster?reportFormat=HTML&warehouseId=IST2' +
-            '&employeeStatusActive=true&employeeTypeAmzn=true&employeeTypeTemp=true&employeeType3Pty=true&submit=true';
+        const BATCH = 20;
+        const totalBatches = Math.ceil(logins.length / BATCH);
 
-        await new Promise((resolve) => {
-            GM_xmlhttpRequest({
-                method: 'GET', url, withCredentials: true,
-                onload: function(resp) {
-                    console.log('[Roster] status:', resp.status, 'size:', resp.responseText.length);
-                    try {
-                        // HTML'i parse et — table[2], cells[1]=login, cells[10]=shift
-                        const parser = new DOMParser();
-                        const doc = parser.parseFromString(resp.responseText, 'text/html');
-                        const table = doc.querySelectorAll('table')[2];
-                        if (!table) { console.error('[Roster] Table not found'); resolve(); return; }
-                        const rows = table.rows;
-                        let count = 0;
-                        for (let i = 1; i < rows.length; i++) {
-                            const login = rows[i].cells[1]?.innerText?.trim();
-                            const shift = rows[i].cells[10]?.innerText?.trim();
-                            if (login && shift) {
-                                shiftPreloadMap[login] = shift;
-                                count++;
+        for (let i = 0; i < totalBatches; i++) {
+            if (wrStopRequested) break;
+            const batch = logins.slice(i * BATCH, (i + 1) * BATCH);
+            const url = 'https://fclm-portal.amazon.com/search?term=' + encodeURIComponent(batch.join(', ')) +
+                '&warehouseId=IST2&employeeStatusActive=true&employeeStatusInactive=true&employeeStatusTerminated=true&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
+
+            if (statusEl) statusEl.textContent = 'Loading shifts... ' + (i+1) + '/' + totalBatches + ' (' + Object.keys(shiftPreloadMap).length + ' loaded)';
+
+            const result = await new Promise((resolve) => {
+                GM_xmlhttpRequest({
+                    method: 'GET', url, withCredentials: true,
+                    onload: function(resp) {
+                        const map = {};
+                        console.log('[FCLM] Batch', i+1, 'status:', resp.status, 'size:', resp.responseText.length);
+                        try {
+                            const html = resp.responseText;
+                            const cardRe = /class="label">Login<\/span>([\w-]+)<\/li>[\s\S]*?class="label">Shift<\/span>([\w-]+)<\/li>/g;
+                            let m;
+                            while ((m = cardRe.exec(html)) !== null) {
+                                map[m[1]] = m[2];
                             }
-                        }
-                        console.log('[Roster] Parsed:', count, 'shift patterns');
-                        if (statusEl) statusEl.textContent = '✓ ' + count + ' shift patterns loaded';
-                    } catch(e) { console.error('[Roster] Parse error:', e); }
-                    resolve();
-                },
-                onerror: function() { console.error('[Roster] Request error'); resolve(); },
-                ontimeout: function() { console.error('[Roster] Timeout'); resolve(); }
+                            console.log('[FCLM] Batch', i+1, 'parsed:', Object.keys(map).length, 'of', batch.length);
+                            const missing = batch.filter(l => !map[l]);
+                            if (missing.length > 0) console.log('[FCLM] Batch', i+1, 'missing:', missing);
+                        } catch(e) {}
+                        resolve(map);
+                    },
+                    onerror: function() { console.error('[FCLM] Batch', i+1, 'error'); resolve({}); },
+                    ontimeout: function() { console.error('[FCLM] Batch', i+1, 'timeout'); resolve({}); }
+                });
             });
-        });
 
+            Object.assign(shiftPreloadMap, result);
+            await new Promise(r => setTimeout(r, 200));
+        }
+
+        if (statusEl) statusEl.textContent = '✓ ' + Object.keys(shiftPreloadMap).length + ' shift patterns loaded';
         if (btnEl) { btnEl.disabled = false; btnEl.textContent = '🔄 Fetch Shift Data'; }
-        console.log('[Roster] Total in shiftPreloadMap:', Object.keys(shiftPreloadMap).length);
+        console.log('[FCLM] Total loaded:', Object.keys(shiftPreloadMap).length);
     }
     window.addEventListener('message', function(e) {
         if (!e.data || e.data.type !== 'WR_ATLAS_RESULT') return;
