@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      123.0
+// @version      124.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker (Roster shift fetch)
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
@@ -455,6 +455,41 @@
         document.getElementById('wr-picker-to').value = today;
     }
     setDefaultDates();
+
+    // ── Güncelleme kontrolü — her açılışta arka planda ─────────────────────
+    (async function checkForUpdates() {
+        try {
+            await new Promise(r => setTimeout(r, 3000)); // sayfa yüklensin
+            const CURRENT_VERSION = 124.0;
+            const UPDATE_URL = 'https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js';
+            const INSTALL_URL = 'https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js';
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: UPDATE_URL + '?_=' + Date.now(),
+                onload: function(resp) {
+                    try {
+                        const match = resp.responseText.match(/@version\s+([\d.]+)/);
+                        if (!match) return;
+                        const latestVersion = parseFloat(match[1]);
+                        if (latestVersion > CURRENT_VERSION) {
+                            console.log('[Update] Yeni versiyon:', latestVersion, '> Mevcut:', CURRENT_VERSION);
+                            // Panel açık değilse bildirim göster
+                            const existing = document.getElementById('wr-update-banner');
+                            if (existing) return;
+                            const banner = document.createElement('div');
+                            banner.id = 'wr-update-banner';
+                            banner.style.cssText = 'position:fixed;bottom:80px;right:20px;z-index:99998;background:#f59e0b;color:#1a1b2e;padding:12px 16px;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;font-weight:700;box-shadow:0 4px 20px rgba(0,0,0,0.3);cursor:pointer;display:flex;align-items:center;gap:10px;';
+                            banner.innerHTML = '🔔 Yeni güncelleme: v' + latestVersion + ' <span style="background:#1a1b2e;color:#f59e0b;padding:3px 10px;border-radius:6px;font-size:12px;">Güncelle</span>';
+                            banner.addEventListener('click', () => window.open(INSTALL_URL, '_blank'));
+                            document.body.appendChild(banner);
+                        }
+                    } catch(e) {}
+                },
+                onerror: function() {}
+            });
+        } catch(e) {}
+    })();
 
     // ── Startup: arka planda shift pattern'leri preload et (Roster) ──────────
     (async function autoPreloadShifts() {
@@ -925,7 +960,7 @@
         if (statusEl) { statusEl.style.color = '#f9e2af'; statusEl.textContent = 'Fetching data from ATLAS tab...'; }
     }
 
-    
+
 
         // ── Bind fetch buttons ─────────────────────────────────────────────────────
     function getDateRange(tab) {
