@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      124.0
+// @version      125.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker (Roster shift fetch)
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
