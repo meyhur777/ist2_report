@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Weekly Report Card IST2
 // @namespace    muraoget_ist2
-// @version      125.0
+// @version      132.0
 // @description  IST2 Pick Performance Report - Manager / Shift / Vardiya / Picker (Roster shift fetch)
 // @author       muraoget
 // @updateURL    https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js
@@ -10,6 +10,7 @@
 // @match        https://moc.prod.atlas-opensearch.qubit.amazon.dev/*
 // @match        https://atlas.qubit.amazon.dev/*
 // @match        https://fclm-portal.amazon.com/search*
+// @match        https://fclm-portal.amazon.com/ppa/inspect/process*
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // @connect      fclm-portal.amazon.com
@@ -22,6 +23,7 @@
     const IS_RAW_REPORTS = window.location.hostname === 'atlas.qubit.amazon.dev' && window.location.pathname.includes('reporting');
     const IS_PICKING = window.location.hostname.includes('picking-console');
     const IS_FCLM_SEARCH = window.location.hostname === 'fclm-portal.amazon.com' && window.location.pathname.includes('/search');
+    const IS_FCLM_PPA = window.location.hostname === 'fclm-portal.amazon.com' && window.location.pathname.includes('/ppa/inspect');
 
     // ── ATLAS page: fetch data and store ──────────────────────────────────────
     if (IS_ATLAS) {
@@ -51,6 +53,74 @@
         window.__WR_RAW_RUNNING__ = true;
         // Raw Reports page - read table and send to opener
         setTimeout(readTableAndSend, 4000);
+        return;
+    }
+
+
+    // ── FCLM PPA page: parse idle time table and send to opener ──────────────
+    if (IS_FCLM_PPA) {
+        function parsePPATable() {
+            const idleMap = {};
+            const tables = document.querySelectorAll('table');
+            let totalParsed = 0;
+            tables.forEach(function(table) {
+                const rows = table.querySelectorAll('tr');
+                let empIdx = -1, directIdx = -1, totalIdx = -1;
+                let headerFound = false;
+                rows.forEach(function(row) {
+                    const cells = row.querySelectorAll('td, th');
+                    const cellTexts = Array.from(cells).map(c => c.textContent.replace(/,/g,'').trim());
+                    if (cellTexts.length < 5) return;
+                    if (!headerFound) {
+                        const joined = cellTexts.join('|').toLowerCase();
+                        if (joined.includes('employee') && joined.includes('hours')) {
+                            empIdx = cellTexts.findIndex(c => /employee\s*id/i.test(c));
+                            directIdx = cellTexts.findIndex(c => /hours.*direct/i.test(c));
+                            totalIdx = cellTexts.findIndex(c => /hours.*total/i.test(c));
+                            if (empIdx >= 0 && directIdx >= 0 && totalIdx >= 0) {
+                                headerFound = true;
+                                console.log('[PPA-PAGE] Header found — EmpID:', empIdx, 'Direct:', directIdx, 'Total:', totalIdx);
+                            }
+                        }
+                        return;
+                    }
+                    if (cellTexts.length > Math.max(empIdx, directIdx, totalIdx)) {
+                        const empId = cellTexts[empIdx].replace(/[^\d]/g, '');
+                        if (!empId || empId.length < 6) return;
+                        const direct = parseFloat(cellTexts[directIdx]) || 0;
+                        const total = parseFloat(cellTexts[totalIdx]) || 0;
+                        const idle = Math.max(0, total - direct);
+                        idleMap[empId] = (idleMap[empId] || 0) + idle;
+                        totalParsed++;
+                    }
+                });
+            });
+            console.log('[PPA-PAGE] Parsed', totalParsed, 'rows,', Object.keys(idleMap).length, 'unique employees');
+            return idleMap;
+        }
+        function sendIdleData() {
+            const idleMap = parsePPATable();
+            if (Object.keys(idleMap).length === 0) {
+                console.warn('[PPA-PAGE] No data found yet, retrying in 2s...');
+                setTimeout(sendIdleData, 2000);
+                return;
+            }
+            if (window.opener && !window.opener.closed) {
+                window.opener.postMessage({ type: 'WR_PPA_IDLE_RESULT', idleMap: idleMap }, '*');
+                console.log('[PPA-PAGE] Sent idle data to opener:', Object.keys(idleMap).length, 'employees');
+            }
+            try { const bc = new BroadcastChannel('wr_ppa_idle'); bc.postMessage({ type: 'WR_PPA_IDLE_RESULT', idleMap: idleMap }); bc.close(); } catch(e) {}
+            const banner = document.createElement('div');
+            banner.style.cssText = 'position:fixed;top:10px;right:10px;z-index:99999;background:#27AE60;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;font-weight:bold;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
+            banner.textContent = '\u2713 Idle Time sent \u2014 ' + Object.keys(idleMap).length + ' employees';
+            document.body.appendChild(banner);
+            setTimeout(function() { window.close(); }, 2000);
+        }
+        if (document.readyState === 'complete') {
+            setTimeout(sendIdleData, 3000);
+        } else {
+            window.addEventListener('load', function() { setTimeout(sendIdleData, 3000); });
+        }
         return;
     }
 
@@ -301,7 +371,7 @@
                 <select class="wr-select" id="wr-manager">
                     <option value="">— Loading managers... —</option>
                 </select>
-                <div class="wr-label" style="margin-top:6px;">ATLAS Login <span style="color:#a6adc8;font-size:10px;">(örn: stuzlen)</span></div>
+                <div class="wr-label" style="margin-top:6px;">ATLAS Login <span style="color:#a6adc8;font-size:10px;">(e.g. stuzlen)</span></div>
                 <input class="wr-input" type="text" id="wr-atlas-login" placeholder="Manager ATLAS login (e.g. stuzlen)">
                 <div id="wr-shift-filter-section" style="display:none;">
                     <div class="wr-label">Shift Filter <span style="color:#a6adc8;font-size:10px;">(optional)</span></div>
@@ -310,6 +380,10 @@
                 <div class="wr-atlas-section">
                     <button class="wr-btn wr-btn-secondary" id="wr-atlas-fetch-btn">🔄 Fetch ATLAS Data</button>
                     <div class="wr-atlas-status" id="wr-atlas-status"></div>
+                </div>
+                <div class="wr-atlas-section" style="margin-top:6px;">
+                    <button class="wr-btn wr-btn-secondary" id="wr-ppa-fetch-btn" style="background:#2d4a6a;">\u23f1 Fetch Idle Time (PPA)</button>
+                    <div class="wr-atlas-status" id="wr-ppa-status"></div>
                 </div>
             </div>
 
@@ -328,6 +402,10 @@
                 <div class="wr-atlas-section">
                     <button class="wr-btn wr-btn-secondary" id="wr-atlas-fetch-btn-shift">🔄 Fetch ATLAS Data</button>
                     <div class="wr-atlas-status" id="wr-atlas-status-shift"></div>
+                </div>
+                <div class="wr-atlas-section" style="margin-top:6px;">
+                    <button class="wr-btn wr-btn-secondary" id="wr-ppa-fetch-btn-shift" style="background:#2d4a6a;">\u23f1 Fetch Idle Time (PPA)</button>
+                    <div class="wr-atlas-status" id="wr-ppa-status-shift"></div>
                 </div>
                 <button class="wr-btn wr-btn-secondary" id="wr-generate-all" style="margin-top:6px;">📥 Generate All Shifts</button>
             </div>
@@ -348,6 +426,10 @@
                     <button class="wr-btn wr-btn-secondary" id="wr-atlas-fetch-btn-vardiya">🔄 Fetch ATLAS Data</button>
                     <div class="wr-atlas-status" id="wr-atlas-status-vardiya"></div>
                 </div>
+                <div class="wr-atlas-section" style="margin-top:6px;">
+                    <button class="wr-btn wr-btn-secondary" id="wr-ppa-fetch-btn-vardiya" style="background:#2d4a6a;">\u23f1 Fetch Idle Time (PPA)</button>
+                    <div class="wr-atlas-status" id="wr-ppa-status-vardiya"></div>
+                </div>
             </div>
 
             <!-- Picker Sekmesi -->
@@ -361,6 +443,10 @@
                 <div class="wr-atlas-section">
                     <button class="wr-btn wr-btn-secondary" id="wr-atlas-fetch-btn-picker">🔄 Fetch ATLAS Data</button>
                     <div class="wr-atlas-status" id="wr-atlas-status-picker"></div>
+                </div>
+                <div class="wr-atlas-section" style="margin-top:6px;">
+                    <button class="wr-btn wr-btn-secondary" id="wr-ppa-fetch-btn-picker" style="background:#2d4a6a;">\u23f1 Fetch Idle Time (PPA)</button>
+                    <div class="wr-atlas-status" id="wr-ppa-status-picker"></div>
                 </div>
             </div>
 
@@ -441,7 +527,7 @@
     }
 
     function setDefaultDates() {
-        const w = getWeekRange(4); // ~1 ay önce
+        const w = getWeekRange(4); // ~1 month ago
         // Her sekme için ~1 ay öncesinin haftası
         document.getElementById('wr-manager-from').value = w.startDate;
         document.getElementById('wr-manager-to').value = w.endDate;
@@ -456,11 +542,11 @@
     }
     setDefaultDates();
 
-    // ── Güncelleme kontrolü — her açılışta arka planda ─────────────────────
+    // ── Updateme kontrolü — her açılışta arka planda ─────────────────────
     (async function checkForUpdates() {
         try {
-            await new Promise(r => setTimeout(r, 3000)); // sayfa yüklensin
-            const CURRENT_VERSION = 124.0;
+            await new Promise(r => setTimeout(r, 3000)); // wait for page load
+            const CURRENT_VERSION = 132.0;
             const UPDATE_URL = 'https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js';
             const INSTALL_URL = 'https://raw.githubusercontent.com/meyhur777/ist2_report/main/WeeklyReport_IST2_user.js';
 
@@ -480,7 +566,7 @@
                             const banner = document.createElement('div');
                             banner.id = 'wr-update-banner';
                             banner.style.cssText = 'position:fixed;bottom:80px;right:20px;z-index:99998;background:#f59e0b;color:#1a1b2e;padding:12px 16px;border-radius:10px;font-family:Segoe UI,Arial,sans-serif;font-size:13px;font-weight:700;box-shadow:0 4px 20px rgba(0,0,0,0.3);cursor:pointer;display:flex;align-items:center;gap:10px;';
-                            banner.innerHTML = '🔔 Yeni güncelleme: v' + latestVersion + ' <span style="background:#1a1b2e;color:#f59e0b;padding:3px 10px;border-radius:6px;font-size:12px;">Güncelle</span>';
+                            banner.innerHTML = '🔔 New update available: v' + latestVersion + ' <span style="background:#1a1b2e;color:#f59e0b;padding:3px 10px;border-radius:6px;font-size:12px;">Update</span>';
                             banner.addEventListener('click', () => window.open(INSTALL_URL, '_blank'));
                             document.body.appendChild(banner);
                         }
@@ -494,7 +580,7 @@
     // ── Startup: arka planda shift pattern'leri preload et (Roster) ──────────
     (async function autoPreloadShifts() {
         try {
-            await new Promise(r => setTimeout(r, 2000)); // sayfa yüklensin
+            await new Promise(r => setTimeout(r, 2000)); // wait for page load
             console.log('[WeeklyReport] Auto-preloading shifts via Employee Roster...');
             await fetchAllShiftsFromRoster(null, null);
             console.log('[WeeklyReport] Roster preload complete:', Object.keys(shiftPreloadMap).length, 'shifts');
@@ -634,6 +720,41 @@
         });
     }
 
+    // ── PPA Idle Time — cache'den oku veya FCLM PPA sayfası aç ────────────
+    async function fetchPPAIdleTime(fromDate, toDate) {
+        if (Object.keys(ppaIdleCache).length > 0) {
+            console.log('[PPA] Using cached idle data:', Object.keys(ppaIdleCache).length, 'employees');
+            return ppaIdleCache;
+        }
+        const startDate = fromDate.replace(/-/g, '/');
+        const url = 'https://fclm-portal.amazon.com/ppa/inspect/process?primaryAttribute=PICKING_PROCESS_PATH&secondaryAttribute=PURPOSE' +
+            '&nodeType=FC&warehouseId=IST2&processId=100008' +
+            '&spanType=Week&startDateWeek=' + encodeURIComponent(startDate) +
+            '&startDateDay=' + encodeURIComponent(startDate) +
+            '&startDateMonth=' + encodeURIComponent(startDate.slice(0,7) + '/01') +
+            '&maxIntradayDays=1&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
+        const ppaWin = window.open(url, '_blank');
+        if (!ppaWin) { console.warn('[PPA] Popup blocked'); return {}; }
+        return new Promise(function(resolve) {
+            const timeout = setTimeout(function() { resolve(ppaIdleCache); }, 30000);
+            function listener(e) {
+                if (!e.data || e.data.type !== 'WR_PPA_IDLE_RESULT') return;
+                clearTimeout(timeout);
+                window.removeEventListener('message', listener);
+                ppaIdleCache = e.data.idleMap || {};
+                resolve(ppaIdleCache);
+            }
+            window.addEventListener('message', listener);
+        });
+    }
+
+    function formatIdleTime(hours) {
+        if (!hours || hours < 0.01) return '0h 0m';
+        const h = Math.floor(hours);
+        const m = Math.round((hours - h) * 60);
+        return h + 'h ' + m + 'm';
+    }
+
     // ── ATLAS Quality Map ──────────────────────────────────────────────────────
     window.atlasQualityMap = {};
     let atlasQualityMap = window.atlasQualityMap;
@@ -696,7 +817,7 @@
                     // Login redirect kontrolü
                     if (resp.responseText.includes('ap/signin') || resp.responseText.length < 1000) {
                         console.error('[ROSTER] Auth redirect detected, size:', resp.responseText.length);
-                        if (statusEl) statusEl.textContent = '\u274c FCLM oturumu açık değil — yeni sekmede FCLM\'e gir';
+                        if (statusEl) statusEl.textContent = '\u274c FCLM session not active — open FCLM in a new tab first';
                         if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
                         resolve({});
                         return;
@@ -831,13 +952,13 @@
                 },
                 onerror: function(e) {
                     console.error('[ROSTER] Request error:', e);
-                    if (statusEl) statusEl.textContent = '\u274c Roster bağlantı hatası';
+                    if (statusEl) statusEl.textContent = '\u274c Roster connection error';
                     if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
                     resolve({});
                 },
                 ontimeout: function() {
                     console.error('[ROSTER] Timeout (60s)');
-                    if (statusEl) statusEl.textContent = '\u274c Roster timeout — FCLM yavaş yanıt verdi';
+                    if (statusEl) statusEl.textContent = '\u274c Roster timeout — FCLM responded too slowly';
                     if (btnEl) { btnEl.disabled = false; btnEl.textContent = '\ud83d\udd04 Fetch Shift Data'; }
                     resolve({});
                 }
@@ -858,9 +979,25 @@
             await new Promise(r => setTimeout(r, 300));
         }
     }
+    // ── PPA Idle Time cache + listener ──────────────────────────────────────
+    let ppaIdleCache = {};
+    window.addEventListener('message', function(e) {
+        if (!e.data || e.data.type !== 'WR_PPA_IDLE_RESULT') return;
+        console.log('[WeeklyReport] PPA Idle data received:', Object.keys(e.data.idleMap || {}).length, 'employees');
+        ppaIdleCache = e.data.idleMap || {};
+        ['', '-shift', '-vardiya', '-picker'].forEach(function(suffix) {
+            const el = document.getElementById('wr-ppa-status' + suffix);
+            if (el) { el.textContent = '\u2713 Idle data: ' + Object.keys(ppaIdleCache).length + ' employees'; el.style.color = '#10b981'; }
+        });
+    });
+    try {
+        const bc = new BroadcastChannel('wr_ppa_idle');
+        bc.onmessage = function(e) { if (e.data && e.data.type === 'WR_PPA_IDLE_RESULT') { ppaIdleCache = e.data.idleMap || {}; } };
+    } catch(ex) {}
+
     window.addEventListener('message', function(e) {
         if (!e.data || e.data.type !== 'WR_ATLAS_RESULT') return;
-        console.log('[WeeklyReport] ATLAS verisi alındı:', e.data);
+        console.log('[WeeklyReport] ATLAS data received:', e.data);
         try {
             // Support both qualityMap (from Raw Reports) and rawCounts (from OpenSearch)
             if (e.data.qualityMap) {
@@ -919,7 +1056,7 @@
             } else if (selectedVardiya === 'ES') {
                 startTime = '08%3A00%3A00';
                 endTime   = '16%3A00%3A00';
-            } else { // LS — gece yarısına taşar, toDate+1
+            } else { // LS — crosses midnight, toDate+1
                 startTime = '16%3A00%3A00';
                 endTime   = '23%3A45%3A00';
                 const toDt = new Date(toDate + 'T00:00:00');
@@ -997,7 +1134,7 @@
         btn.addEventListener('click', function() {
             const dates = getDateRange(tab);
             if (!dates.from || !dates.to) {
-                if (statusEl) { statusEl.style.color = '#f38ba8'; statusEl.textContent = '✗ Önce tarih gir'; }
+                if (statusEl) { statusEl.style.color = '#f38ba8'; statusEl.textContent = '✗ Enter dates first'; }
                 return;
             }
             fetchAllAtlasData(dates.from, dates.to, statusEl, btn);
@@ -1021,7 +1158,7 @@
     const shiftPreloadMap = {};
     let wrStopRequested = false;
     let scorecardCache = [];
-    let allPickersCache = []; // Son 3 haftanın birleşik listesi
+    let allPickersCache = []; // Combined list from last 3 weeks
 
     async function loadManagers() {
         const weeks = [getWeekRange(0), getWeekRange(1), getWeekRange(2)];
@@ -1048,7 +1185,7 @@
             sel.appendChild(opt);
         });
 
-        // Shift dropdown - tarih seçilince yüklenecek
+        // Shift dropdown - loads when dates are selected
         const shiftSel = document.getElementById('wr-shift-select');
         shiftSel.innerHTML = '<option value="">— Set dates and click Load —</option>';
     }
@@ -1113,7 +1250,7 @@
         btn.textContent = '🔄 Reload Shift Patterns';
     });
 
-    // Manager değişince shift'leri yükle
+    // Load shifts when manager changes
     document.getElementById('wr-manager').addEventListener('change', async function() {
         const manager = this.value;
         const shiftSection = document.getElementById('wr-shift-filter-section');
@@ -1180,6 +1317,35 @@
         const count = Object.entries(shiftPreloadMap).filter(([login, s]) => s === shift).length;
         info.textContent = count + ' pickers with this shift pattern';
         setTimeout(() => document.getElementById('wr-generate').click(), 300);
+    });
+
+
+    // ── PPA Idle Time fetch buttons ──────────────────────────────────────────
+    ['', '-shift', '-vardiya', '-picker'].forEach(function(suffix) {
+        const btn = document.getElementById('wr-ppa-fetch-btn' + suffix);
+        if (!btn) return;
+        btn.addEventListener('click', function() {
+            const tab = suffix === '' ? 'manager' : suffix.replace('-','');
+            const dates = getDateRange(tab);
+            if (!dates || !dates.from) return;
+            const startDate = dates.from.replace(/-/g, '/');
+            const url = 'https://fclm-portal.amazon.com/ppa/inspect/process?primaryAttribute=PICKING_PROCESS_PATH&secondaryAttribute=PURPOSE' +
+                '&nodeType=FC&warehouseId=IST2&processId=100008' +
+                '&spanType=Week&startDateWeek=' + encodeURIComponent(startDate) +
+                '&startDateDay=' + encodeURIComponent(startDate) +
+                '&startDateMonth=' + encodeURIComponent(startDate.slice(0,7) + '/01') +
+                '&maxIntradayDays=1&startHourIntraday1=0&startMinuteIntraday1=0&startHourIntraday2=0&startMinuteIntraday2=0';
+            const ppaWin = window.open(url, '_blank');
+            if (!ppaWin) {
+                const st = document.getElementById('wr-ppa-status' + suffix);
+                if (st) { st.textContent = '\u2717 Popup blocked!'; st.style.color = '#ef4444'; }
+                return;
+            }
+            btn.disabled = true; btn.textContent = '\u23f3 Waiting for PPA...';
+            const st = document.getElementById('wr-ppa-status' + suffix);
+            if (st) { st.textContent = 'FCLM page opened, waiting for data...'; st.style.color = '#f59e0b'; }
+            setTimeout(function() { btn.disabled = false; btn.textContent = '\u23f1 Fetch Idle Time (PPA)'; }, 35000);
+        });
     });
 
     // ── Generate ───────────────────────────────────────────────────────────────
@@ -1250,7 +1416,7 @@
         // Build combined HTML with all shifts
         const combinedPickerList = allPickers.filter(p => shiftPreloadMap[p.login]);
         status.textContent = 'Building report...';
-        const html = buildReportHTML(combinedPickerList, weeks, weeklyScorecard, pickHistoryMap, shiftPreloadMap, atlasQualityMap, 'All Shifts — ' + weekLabel);
+        const html = buildReportHTML(combinedPickerList, weeks, weeklyScorecard, pickHistoryMap, shiftPreloadMap, atlasQualityMap, 'All Shifts — ' + weekLabel, {});
         const fname = 'WeeklyReport_AllShifts_' + weekLabel + '.html';
         const blob = new Blob([html], {type:'text/html'});
         const a = document.createElement('a');
@@ -1371,10 +1537,12 @@
         const weeklyScorecard = await Promise.all(weeks.map(w => fetchScorecard(w.start, w.end)));
         scorecardCache = weeklyScorecard[2];
 
-        // Picker listesini moda göre filtrele
+        // PPA Idle Time
+        status.textContent = 'Fetching idle time from PPA...';
+        const ppaIdleMap = await fetchPPAIdleTime(fromDate, toDate);
         let pickerList = [];
         let reportTitle = '';
-        let dayWindows = []; // vardiya sekmesi için gün gün pencereler
+        let dayWindows = []; // day-by-day windows for shift tab
 
         if (activeTab === 'manager') {
             const manager = document.getElementById('wr-manager').value;
@@ -1542,10 +1710,11 @@
         });
         console.log('--- END DEBUG ---');
         status.textContent = 'Building report...';
-        const html = buildReportHTML(pickerList, weeks, weeklyScorecard, pickHistoryMap, shiftMap, atlasQualityMap, reportTitle);
+        const html = buildReportHTML(pickerList, weeks, weeklyScorecard, pickHistoryMap, shiftMap, atlasQualityMap, reportTitle, ppaIdleMap);
         const fname = 'WeeklyReport_' + reportTitle.replace(/[^a-zA-Z0-9]/g, '_') + '_' + weekLabel + '.html';
         downloadHTML(html, fname);
-        status.textContent = '✓ Done! ' + pickerList.length + ' pickers — ' + weekLabel;
+        downloadCSV(pickerList, weeks, weeklyScorecard, pickHistoryMap, shiftMap, atlasQualityMap, ppaIdleMap, reportTitle, weekLabel);
+        status.textContent = '✓ Done! ' + pickerList.length + ' pickers — ' + weekLabel + ' (HTML + CSV)';
     }
 
     function downloadHTML(html, filename) {
@@ -1557,12 +1726,77 @@
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
+    function downloadCSV(pickerList, weeks, weeklyScorecard, pickHistoryMap, shiftMap, atlasQualityMap, ppaIdleMap, reportTitle, weekLabel) {
+        ppaIdleMap = ppaIdleMap || {};
+        atlasQualityMap = atlasQualityMap || {};
+        const headers = [
+            'Employee ID','Login','Employee Name','Manager','Shift Pattern',
+            'Quantity Picked','Direct Hours','Inferred Hours (Idle)','Total Hours',
+            'UPH Actual','UPH Expected','Rate %',
+            'Shorts','Damages','VLP','Rejects','DPMO',
+            'Days Since Hired',
+            weeks[0].label + ' UPH', weeks[1].label + ' UPH', weeks[2].label + ' UPH',
+            weeks[0].label + ' Qty', weeks[1].label + ' Qty', weeks[2].label + ' Qty'
+        ];
+        const rows = [headers.join(',')];
+        pickerList.forEach(function(sc) {
+            const w0 = weeklyScorecard[0].find(function(p) { return p.login === sc.login; });
+            const w1 = weeklyScorecard[1].find(function(p) { return p.login === sc.login; });
+            const w2 = weeklyScorecard[2].find(function(p) { return p.login === sc.login; });
+            const ps = pickHistoryMap[sc.login] || {};
+            const aq = atlasQualityMap[sc.login] || {};
+            const shift = shiftMap && shiftMap[sc.login] || '-';
+            const idleH = ppaIdleMap[sc.employeeId] || 0;
+            const directH = sc.actualDirectTime || 0;
+            const totalH = directH + idleH;
+            const uph = sc.directPickRate || 0;
+            const expUph = sc.expectedPickRate || 0;
+            const ratePct = expUph > 0 ? Math.round((uph / expUph) * 100) : 0;
+            const row = [
+                sc.employeeId || '',
+                sc.login || '',
+                '"' + (sc.fullName || '').replace(/"/g, '""') + '"',
+                '"' + (sc.managerName || '').replace(/"/g, '""') + '"',
+                '"' + shift + '"',
+                sc.quantityPicked || 0,
+                Math.round(directH * 100) / 100,
+                Math.round(idleH * 100) / 100,
+                Math.round(totalH * 100) / 100,
+                Math.round(uph * 10) / 10,
+                Math.round(expUph * 10) / 10,
+                ratePct,
+                ps.totalShorted || 0,
+                ps.totalDamaged || 0,
+                sc.veryLongPicks || 0,
+                sc.noOfRejects || 0,
+                aq.dpmo || 0,
+                sc.daysSinceHired || '',
+                w0 && w0.directPickRate ? Math.round(w0.directPickRate*10)/10 : '',
+                w1 && w1.directPickRate ? Math.round(w1.directPickRate*10)/10 : '',
+                w2 && w2.directPickRate ? Math.round(w2.directPickRate*10)/10 : '',
+                w0 && w0.quantityPicked ? w0.quantityPicked : '',
+                w1 && w1.quantityPicked ? w1.quantityPicked : '',
+                w2 && w2.quantityPicked ? w2.quantityPicked : ''
+            ];
+            rows.push(row.join(','));
+        });
+        const csvContent = '\uFEFF' + rows.join('\r\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'WeeklyReport_' + reportTitle.replace(/[^a-zA-Z0-9]/g, '_') + '_' + weekLabel + '.csv';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+
+
 
     // ── HTML Builder ─────────────────────────────────────────────────────────
     function buildSinglePickerHTML(sc, ps, fromDate, toDate) {
         const shiftVal = '-';
         const aq = atlasQualityMap[sc.login] || null;
-        const tableHTML = buildPickerTable(sc, null, null, sc, ps, aq, { label: fromDate + ' → ' + toDate, startDate: fromDate, endDate: toDate }, 'Picker Report', [{ label: '-' }, { label: '-' }, { label: fromDate + ' → ' + toDate }], shiftVal);
+        const tableHTML = buildPickerTable(sc, null, null, sc, ps, aq, { label: fromDate + ' → ' + toDate, startDate: fromDate, endDate: toDate }, 'Picker Report', [{ label: '-' }, { label: '-' }, { label: fromDate + ' → ' + toDate }], shiftVal, {});
 
         let html = '<!DOCTYPE html><html><head><meta charset="UTF-8">';
         html += '<title>Picker Report — ' + sc.login + '</title>';
@@ -1573,7 +1807,8 @@
         return html;
     }
 
-    function buildReportHTML(pickerList, weeks, weeklyScorecard, pickHistoryMap, shiftMap, atlasQualityMap, manager) {
+    function buildReportHTML(pickerList, weeks, weeklyScorecard, pickHistoryMap, shiftMap, atlasQualityMap, manager, ppaIdleMap) {
+        ppaIdleMap = ppaIdleMap || {};
         const cw = weeks[2];
 
         let html = '<!DOCTYPE html><html><head><meta charset="UTF-8">';
@@ -1721,7 +1956,7 @@
             html += '<button class="print-btn" onclick="printCurrent()">🖨️ Print This</button>';
             html += '<button class="print-all-btn" onclick="printAll()">🖨️ Print All</button>';
             html += '</div>';
-            html += buildPickerTable(sc, w0, w1, w2, ps, aq, cw, manager, weeks, shift);
+            html += buildPickerTable(sc, w0, w1, w2, ps, aq, cw, manager, weeks, shift, ppaIdleMap);
             html += '</div>';
         });
         html += '</div></body></html>';
@@ -1732,7 +1967,8 @@
         return '<style>* { box-sizing: border-box; }</style>';
     }
 
-    function buildPickerTable(sc, w0, w1, w2, ps, aq, cw, manager, weeks, shiftVal) {
+    function buildPickerTable(sc, w0, w1, w2, ps, aq, cw, manager, weeks, shiftVal, ppaIdleMap) {
+        ppaIdleMap = ppaIdleMap || {};
         const C = {
             headerBg: '#2C3E50', headerFg: '#FFFFFF',
             subheaderBg: '#5D6D7E', subheaderFg: '#FFFFFF',
@@ -1822,6 +2058,19 @@
             s(C.rowB,'#1A252F',false,'center') + (ps&&ps.totalDamaged||0) + '</td>' +
             s(C.rowB,'#1A252F',false,'center') + (sc.veryLongPicks||0) + '</td>' +
             s(C.rowB,'#1A252F',false,'center') + (sc.noOfRejects||0) + '</td></tr>';
+
+        // Idle Time
+        const idleHours = ppaIdleMap[sc.employeeId] || 0;
+        t += '<tr>' + s(C.labelBg,C.labelFg,true,'center') + 'Idle Time</td>' +
+            s(C.labelBg,C.labelFg,true,'center') + '' + '</td>' +
+            s(C.labelBg,C.labelFg,true,'center') + '' + '</td>' +
+            s(C.labelBg,C.labelFg,true,'center') + '' + '</td></tr>';
+        t += '<tr>' +
+            s(C.rowA,'#c0392b',true,'center') + formatIdleTime(idleHours) + '</td>' +
+            s(C.rowA,'',false,'center') + '' + '</td>' +
+            s(C.rowA,'',false,'center') + '' + '</td>' +
+            s(C.rowA,'',false,'center') + '' + '</td></tr>';
+
         t += '</table>';
 
         // Performance Trend
@@ -1947,7 +2196,7 @@
                 s(parseInt(aqData.totalDefects)>0?'#FADBD8':C.rowB,'#1A252F',true,'center') + aqData.totalDefects + '</td>' +
                 s(C.rowB,'#1A252F',false,'center') + aqData.dpmo + ' DPMO</td>' +
                 s(C.rowB,'#555',false,'center') + '-</td></tr>';
-            t += '<tr><td colspan="4" style="font-size:6pt;color:#777;font-style:italic;padding:2px 4px;border:' + bd + ';background:#F8F9FA;">' + (noAtlas ? 'ATLAS verisi bulunamadı' : 'Individual Metrics') + '</td></tr>';
+            t += '<tr><td colspan="4" style="font-size:6pt;color:#777;font-style:italic;padding:2px 4px;border:' + bd + ';background:#F8F9FA;">' + (noAtlas ? 'ATLAS data not found' : 'Individual Metrics') + '</td></tr>';
             const defects = [
                 {label:'Damage', key:'damage', threshold:thresholds.damage},
                 {label:'Short', key:'short', threshold:thresholds.short},
@@ -1988,7 +2237,7 @@
         });
         t += '</table>';
 
-        t += '</div>'; // Sağ bitti
+        t += '</div>'; // End right column
         t += '</div>'; // Wrapper bitti
 
         return t;
@@ -2004,7 +2253,7 @@
             const bc = new BroadcastChannel('wr_ist2_atlas');
             bc.onmessage = function(event) {
                 if (event.data && event.data.type === 'atlasData') {
-                    console.log('[WeeklyReport] BroadcastChannel veri alındı');
+                    console.log('[WeeklyReport] BroadcastChannel data received');
                     try {
                         const parsed = JSON.parse(event.data.payload);
                         atlasQualityMap = parsed.data || {};
@@ -2018,14 +2267,14 @@
                             if (btn) { btn.style.borderColor = '#a6e3a1'; btn.style.color = '#a6e3a1'; }
                         });
                         recalcDpmo();
-                        console.log('[WeeklyReport] atlasQualityMap güncellendi:', count, 'pickers');
+                        console.log('[WeeklyReport] atlasQualityMap updated:', count, 'pickers');
                         // Also try to read from localStorage as backup
                         try {
                             const lsData = localStorage.getItem('wr_atlas_rawCounts');
                             if (lsData) console.log('[WeeklyReport] localStorage also has data');
                         } catch(e) {}
                     } catch(e) {
-                        console.error('[WeeklyReport] BroadcastChannel parse hatası:', e);
+                        console.error('[WeeklyReport] BroadcastChannel parse error:', e);
                     }
                 }
             };
@@ -2212,7 +2461,7 @@ async function autoFetchForOpener(params) {
                 });
                 setStatus('✓ ' + dash.type + ': ' + hits.length + ' hits');
             } catch(e) {
-                setStatus('⚠ ' + dash.type + ' atlandı: ' + e.message.slice(0,50));
+                setStatus('⚠ ' + dash.type + ' skipped: ' + e.message.slice(0,50));
             }
             await new Promise(r => setTimeout(r, 300));
         }
@@ -2371,7 +2620,7 @@ function readTableAndSend() {
             if (nextBtn) {
                 console.log('[RAW-REPORTS] Next button found, clicking page', pageNum + 1);
                 nextBtn.click();
-                // Yeni sayfanın yüklenmesini bekle
+                // Wait for new page to load
                 setTimeout(() => processAllPages(pageNum + 1, 10), 2000);
             } else {
                 console.log('[RAW-REPORTS] No next button — last page reached');
@@ -2553,12 +2802,12 @@ function injectAtlasPanel() {
             try {
                 if (window.opener && !window.opener.closed) {
                     window.opener.postMessage({ type: 'WR_ATLAS_RESULT', qualityMap }, '*');
-                    console.log('[ATLAS] postMessage gönderildi → opener');
+                    console.log('[ATLAS] postMessage sent → opener');
                 } else {
-                    console.warn('[ATLAS] window.opener yok veya kapalı');
+                    console.warn('[ATLAS] window.opener is null or closed');
                 }
             } catch(e) {
-                console.warn('[ATLAS] postMessage hatası:', e);
+                console.warn('[ATLAS] postMessage error:', e);
             }
 
             // BroadcastChannel fallback (same-origin durumunda çalışır)
@@ -2569,7 +2818,7 @@ function injectAtlasPanel() {
             } catch(e) {}
 
             const count = Object.keys(qualityMap).length;
-            setStatus('✓ ' + count + ' pickers saved! Picking Console\'a dön.', '#a6e3a1');
+            setStatus('✓ ' + count + ' pickers saved! Return to Picking Console.', '#a6e3a1');
             btn.textContent = '✅ Done!';
 
         } catch(e) {
